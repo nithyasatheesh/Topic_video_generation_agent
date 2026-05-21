@@ -13,6 +13,9 @@ from moviepy.editor import (
     concatenate_videoclips
 )
 
+from pptx import Presentation
+
+import subprocess
 import os
 import json
 import base64
@@ -20,13 +23,12 @@ import shutil
 
 from io import BytesIO
 
-
 st.set_page_config(
-    page_title="AI Topic Video Generator",
+    page_title="AI PPT / Topic Video Generator",
     layout="wide"
 )
 
-st.title("🎬 AI Topic → Video Generator")
+st.title("🎬 PPT / Topic → Video Generator")
 
 client = OpenAI(
     api_key=st.secrets["OPENAI_API_KEY"]
@@ -69,6 +71,10 @@ def font(size):
         return ImageFont.load_default()
 
 
+####################################################
+# TOPIC MODE
+####################################################
+
 def generate_content(topic):
 
     prompt = f"""
@@ -89,18 +95,8 @@ Return JSON:
 ]
 }}
 
-Rules:
-
-Generate 5 slides.
-
-Heading:
-Short
-
-Content:
-Maximum 25 words
-
-Image prompt:
-Highly visual and descriptive
+Generate exactly 5 slides.
+Maximum 25 words content.
 """
 
     response = client.chat.completions.create(
@@ -123,94 +119,57 @@ Highly visual and descriptive
 
 def generate_image(prompt,index):
 
-    response = client.images.generate(
+    image = client.images.generate(
         model="gpt-image-1",
         prompt=prompt,
         size="1536x1024",
         quality="high"
     )
 
-    image_bytes = base64.b64decode(
-        response.data[0].b64_json
+    data = base64.b64decode(
+        image.data[0].b64_json
     )
 
-    image = Image.open(
-        BytesIO(image_bytes)
-    )
+    img = Image.open(
+        BytesIO(data)
+    ).convert("RGB")
 
-    image = image.convert("RGB")
+    path = f"{TEMP_DIR}/image_{index}.png"
 
-    path = os.path.join(
-        TEMP_DIR,
-        f"image_{index}.png"
-    )
-
-    image.save(
-        path,
-        quality=100
-    )
+    img.save(path)
 
     return path
 
 
-def generate_audio(text,index):
+def wrap_text(draw,text,font,width):
 
-    speech = client.audio.speech.create(
-        model="gpt-4o-mini-tts",
-        voice="alloy",
-        input=text
-    )
+    words=text.split()
 
-    path = os.path.join(
-        TEMP_DIR,
-        f"audio_{index}.mp3"
-    )
+    lines=[]
 
-    speech.stream_to_file(
-        path
-    )
-
-    return path
-
-
-def wrap_text(
-    draw,
-    text,
-    font_obj,
-    width
-):
-
-    words = text.split()
-
-    lines = []
-
-    current = ""
+    current=""
 
     for word in words:
 
-        test = current + " " + word
+        test=current+" "+word
 
-        size = draw.textbbox(
+        size=draw.textbbox(
             (0,0),
             test,
-            font=font_obj
+            font=font
         )[2]
 
-        if size > width:
+        if size>width:
 
-            lines.append(
-                current.strip()
-            )
+            lines.append(current)
 
-            current = word
+            current=word
 
         else:
 
-            current = test
+            current=test
 
-    lines.append(
-        current.strip()
-    )
+    lines.append(current)
 
     return "\n".join(lines)
 
@@ -219,225 +178,335 @@ def create_slide(
     heading,
     content,
     image_path,
-    index
+    idx
 ):
 
-    slide = Image.new(
+    slide=Image.new(
         "RGB",
         (WIDTH,HEIGHT),
         "white"
     )
 
-    image = Image.open(
+    img=Image.open(
         image_path
     )
 
-    image.thumbnail(
-        (500,500),
-        Image.LANCZOS
+    img.thumbnail(
+        (500,500)
     )
-
-    x = 700
-    y = 100
 
     slide.paste(
-        image,
-        (x,y)
+        img,
+        (700,100)
     )
 
-    draw = ImageDraw.Draw(
+    draw=ImageDraw.Draw(
         slide
     )
 
-    title_font = font(52)
+    title=font(52)
 
-    body_font = font(30)
+    body=font(30)
 
     draw.text(
         (60,80),
         heading,
         fill="black",
-        font=title_font
-    )
-
-    wrapped = wrap_text(
-        draw,
-        content,
-        body_font,
-        550
+        font=title
     )
 
     draw.multiline_text(
         (60,180),
-        wrapped,
+        wrap_text(
+            draw,
+            content,
+            body,
+            550
+        ),
         fill="black",
-        font=body_font,
-        spacing=10
+        font=body,
+        spacing=12
     )
 
-    slide_path = os.path.join(
-        TEMP_DIR,
-        f"slide_{index}.png"
-    )
+    path=f"{TEMP_DIR}/slide_{idx}.png"
 
-    slide.save(
-        slide_path,
-        quality=100
-    )
+    slide.save(path)
 
-    return slide_path
+    return path
 
 
-def build_video(
-    slides,
-    audios
-):
+####################################################
+# PPT MODE
+####################################################
 
-    clips = []
+def ppt_to_images(ppt_file):
 
-    for slide,audio in zip(
-        slides,
-        audios
-    ):
+    ppt_path=f"{TEMP_DIR}/input.pptx"
 
-        narration = AudioFileClip(
-            audio
+    with open(
+        ppt_path,
+        "wb"
+    ) as f:
+
+        f.write(
+            ppt_file.read()
         )
 
-        duration = narration.duration
+    subprocess.run([
+        "libreoffice",
+        "--headless",
+        "--convert-to",
+        "pdf",
+        ppt_path,
+        "--outdir",
+        TEMP_DIR
+    ])
 
-        clip = (
-            ImageClip(slide)
-            .set_duration(duration)
-            .set_audio(narration)
+    pdf=f"{TEMP_DIR}/input.pdf"
+
+    subprocess.run([
+        "pdftoppm",
+        "-png",
+        pdf,
+        f"{TEMP_DIR}/slide"
+    ])
+
+    files=sorted([
+        os.path.join(
+            TEMP_DIR,
+            x
+        )
+        for x in os.listdir(
+            TEMP_DIR
+        )
+        if x.startswith("slide-")
+    ])
+
+    return files
+
+
+def extract_slide_text(ppt):
+
+    prs=Presentation(
+        ppt
+    )
+
+    output=[]
+
+    for slide in prs.slides:
+
+        text=[]
+
+        for shape in slide.shapes:
+
+            if hasattr(
+                shape,
+                "text"
+            ):
+
+                text.append(
+                    shape.text
+                )
+
+        output.append(
+            " ".join(text)
+        )
+
+    return output
+
+
+####################################################
+# AUDIO
+####################################################
+
+def narration(
+    text,
+    idx
+):
+
+    speech=client.audio.speech.create(
+        model="gpt-4o-mini-tts",
+        voice="alloy",
+        input=text
+    )
+
+    path=f"{TEMP_DIR}/audio_{idx}.mp3"
+
+    speech.stream_to_file(
+        path
+    )
+
+    return path
+
+
+####################################################
+# VIDEO
+####################################################
+
+def build_video(
+    images,
+    audio
+):
+
+    clips=[]
+
+    for img,aud in zip(
+        images,
+        audio
+    ):
+
+        sound=AudioFileClip(
+            aud
+        )
+
+        clip=(
+            ImageClip(img)
+            .set_duration(
+                sound.duration
+            )
+            .set_audio(sound)
         )
 
         clips.append(
             clip
         )
 
-    final = concatenate_videoclips(
+    final=concatenate_videoclips(
         clips,
         method="compose"
     )
 
-    output = os.path.join(
-        TEMP_DIR,
-        "video.mp4"
-    )
+    output=f"{TEMP_DIR}/video.mp4"
 
     final.write_videofile(
         output,
-        fps=24,
         codec="libx264",
         audio_codec="aac",
-        preset="medium",
-        bitrate="5000k",
-        threads=4,
+        fps=24,
         logger=None
     )
-
-    final.close()
 
     return output
 
 
-topic = st.text_input(
-    "Enter Topic"
+mode=st.radio(
+    "Mode",
+    [
+        "Topic",
+        "PPT Upload"
+    ]
 )
 
-if st.button(
-    "Generate Video"
-):
+cleanup()
 
-    if not topic:
+slides=[]
+audio=[]
 
-        st.warning(
-            "Enter a topic"
-        )
+if mode=="Topic":
 
-        st.stop()
+    topic=st.text_input(
+        "Topic"
+    )
 
-    cleanup()
-
-    progress = st.progress(0)
-
-    with st.spinner(
-        "Generating content..."
+    if st.button(
+        "Generate"
     ):
 
-        data = generate_content(
+        data=generate_content(
             topic
         )
 
-    slides = []
+        for idx,s in enumerate(
+            data["slides"]
+        ):
 
-    audios = []
+            img=generate_image(
+                s["image_prompt"],
+                idx
+            )
 
-    total = len(
-        data["slides"]
+            slide=create_slide(
+                s["heading"],
+                s["content"],
+                img,
+                idx
+            )
+
+            aud=narration(
+                s["content"],
+                idx
+            )
+
+            slides.append(
+                slide
+            )
+
+            audio.append(
+                aud
+            )
+
+elif mode=="PPT Upload":
+
+    ppt=st.file_uploader(
+        "Upload PPT",
+        type=["pptx"]
     )
 
-    for idx,slide in enumerate(
-        data["slides"]
-    ):
+    if ppt:
 
-        progress.progress(
-            idx/total
+        ppt_path=f"{TEMP_DIR}/ppt.pptx"
+
+        with open(
+            ppt_path,
+            "wb"
+        ) as f:
+
+            f.write(
+                ppt.read()
+            )
+
+        slides=ppt_to_images(
+            open(
+                ppt_path,
+                "rb"
+            )
         )
 
-        image = generate_image(
-            slide["image_prompt"],
-            idx
+        texts=extract_slide_text(
+            ppt_path
         )
 
-        audio = generate_audio(
-            slide["content"],
-            idx
-        )
+        for idx,text in enumerate(
+            texts
+        ):
 
-        slide_path = create_slide(
-            slide["heading"],
-            slide["content"],
-            image,
-            idx
-        )
+            audio.append(
+                narration(
+                    text,
+                    idx
+                )
+            )
 
-        slides.append(
-            slide_path
-        )
-
-        audios.append(
-            audio
-        )
-
-    progress.progress(0.9)
+if slides and audio:
 
     with st.spinner(
         "Creating video..."
     ):
 
-        video = build_video(
+        video=build_video(
             slides,
-            audios
+            audio
         )
-
-    progress.progress(1.0)
-
-    st.success(
-        "Video Generated"
-    )
 
     st.video(video)
 
     with open(
         video,
         "rb"
-    ) as file:
+    ) as f:
 
         st.download_button(
-            "⬇ Download Video",
-            file,
-            file_name="video.mp4",
-            mime="video/mp4"
+            "Download Video",
+            f,
+            file_name="video.mp4"
         )
